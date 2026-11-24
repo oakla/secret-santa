@@ -33,16 +33,11 @@ Your Secret Santa assignment is in the attached file. Open it when nobody
 else can see your screen.
 """
 ATTACHMENT_NAME = 'secret-santa.txt'
-# The blank lines keep the name out of attachment previews and thumbnails.
 ATTACHMENT = """\
 Hello {giver}!
 
-Make sure nobody else can see your screen, then scroll down for your
-Secret Santa assignment.
-{blank_lines}
 You have been assigned to give a gift to {receiver}.
 """
-BLANK_LINES = 100
 
 
 def read_participants(path):
@@ -91,9 +86,9 @@ def build_email(giver, email, receiver):
     msg['Subject'] = SUBJECT
     msg['X-Unsent'] = '1'  # makes Outlook open the .eml as a draft
     msg.set_content(BODY.format(giver=giver))
-    text = ATTACHMENT.format(giver=giver, receiver=receiver, blank_lines='\n' * BLANK_LINES)
     # base64 keeps the name unreadable if the .eml is opened in a text editor
-    msg.add_attachment(text, filename=ATTACHMENT_NAME, cte='base64')
+    msg.add_attachment(ATTACHMENT.format(giver=giver, receiver=receiver),
+                       filename=ATTACHMENT_NAME, cte='base64')
     return msg
 
 

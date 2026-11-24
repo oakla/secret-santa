@@ -1,6 +1,6 @@
 # Secret Santa
 
-Draws names so everyone gives one gift and gets one, then emails each person their assignment. The assignment only appears inside an attached text file, below a screen of blank lines, so it won't show up in subject lines, inbox previews, file names or terminal output.
+Draws names so everyone gives one gift and gets one, then emails each person their assignment. The assignment only appears inside an attached text file, so it won't show up in subject lines, inbox previews, file names or terminal output.
 
 ## Setup
 
