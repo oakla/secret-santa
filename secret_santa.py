@@ -1,8 +1,10 @@
 import random
 import os
+from datetime import datetime
 
-OUTDIR = 'output/'
-os.makedirs(OUTDIR, exist_ok=True)
+# each run gets its own folder, e.g. output/2026-11-24_153012/
+OUTDIR = os.path.join('output', datetime.now().strftime('%Y-%m-%d_%H%M%S'))
+os.makedirs(OUTDIR)
 
 participants = [
     'Alex',
