@@ -159,9 +159,26 @@ class FileTests(unittest.TestCase):
         self.assertEqual(len(list(self.tmp.glob('*/*'))), 11)
 
     def test_previous_draw_with_backslashes(self):
-        with self.assertRaises(SystemExit) as caught:
-            self.run_main(PREVIOUS_DRAW='2025\12.01-19.30')  # \12 is a newline
-        self.assertIn('forward slashes', str(caught.exception))
+        # What Python makes of '2025\12.01-19.30' and of
+        # 'G:\My Drive\Secret-Santa\2025' typed with single backslashes
+        for mangled in ['2025\n.01-19.30', 'G:\\My Drive\\Secret-Santa\x825']:
+            with self.subTest(mangled=mangled), self.assertRaises(SystemExit) as caught:
+                self.run_main(PREVIOUS_DRAW=mangled)
+            self.assertIn('forward slashes', str(caught.exception))
+
+    def test_previous_draw_as_a_number(self):
+        (self.tmp / '2025').mkdir()
+        for giver, receiver in zip(PEOPLE, PEOPLE[1:] + PEOPLE[:1]):
+            (self.tmp / '2025' / f'{giver}.txt').write_text(ss.message(giver, receiver, PEOPLE))
+        self.assertIn('Avoiding repeats', self.run_main(PREVIOUS_DRAW=2025))
+
+    def test_hint_works_after_saving_elsewhere(self):
+        other = self.tmp / 'other'
+        other.mkdir()
+        out = self.run_main('--output', str(other))
+        hint = out.split("PREVIOUS_DRAW = '")[1].split("'")[0]
+        self.assertTrue(Path(hint).is_absolute())
+        self.assertIn('Avoiding repeats', self.run_main(PREVIOUS_DRAW=hint))
 
     def test_output_option(self):
         other = self.tmp / 'other'

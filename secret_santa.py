@@ -40,9 +40,9 @@ EXCLUDED_PAIRS = [
 OUTPUT_DIR = r'G:\My Drive\Secret-Santa'
 
 # The last draw you sent, so nobody gets the same person again: its folder
-# inside the output folder, such as '2025/12.01-19.30' (use forward
-# slashes), or a full path. Each run prints the value to use next time.
-# None to skip.
+# inside the output folder, such as '2025/12.01-19.30', or a full path such
+# as 'D:/Old/2025/12.01-19.30'. Use forward slashes. Each run prints the
+# value to use next time. None to skip.
 PREVIOUS_DRAW = None
 
 # read_draw() finds the receiver in old files by "give a gift to <name>." at
@@ -181,13 +181,15 @@ def main(argv=None):
     parser.add_argument('--output', metavar='FOLDER', default=OUTPUT_DIR,
                         help='folder to put this run in (default: %(default)s)')
     output = Path(parser.parse_args(argv).output)
+    previous_name = str(PREVIOUS_DRAW) if PREVIOUS_DRAW else None
     try:
-        if PREVIOUS_DRAW and any(ord(c) < 32 for c in PREVIOUS_DRAW):
-            # e.g. '2025\12.01' in a normal string, where \12 is a newline
+        if previous_name and not previous_name.isprintable():
+            # Backslashes in a normal string can turn into other characters:
+            # in '2025\12.01', \12 becomes a newline.
             raise DrawError('Write PREVIOUS_DRAW with forward slashes, '
                             "like '2025/12.01-19.30'.")
         output = choose_output(output)
-        previous_folder = output / PREVIOUS_DRAW if PREVIOUS_DRAW else None
+        previous_folder = output / previous_name if previous_name else None
         previous = read_draw(previous_folder) if previous_folder else {}
         banned = banned_pairs(PARTICIPANTS, EXCLUDED_PAIRS, previous)
         draw, count = make_draw(PARTICIPANTS, banned)
@@ -217,7 +219,9 @@ def main(argv=None):
         text = message(giver, draw[giver], PARTICIPANTS)
         (folder / f'{giver}.txt').write_text(text, encoding='utf-8')
     print(f'Wrote {len(draw)} files to {folder}')
-    print(f"Next time, set PREVIOUS_DRAW = '{folder.relative_to(output).as_posix()}'")
+    # The short form only works if next time's files go to the same place.
+    hint = folder.relative_to(output) if output == Path(OUTPUT_DIR) else folder.resolve()
+    print(f"Next time, set PREVIOUS_DRAW = '{hint.as_posix()}'")
 
 
 if __name__ == '__main__':
