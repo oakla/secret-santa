@@ -33,6 +33,8 @@ PARTICIPANTS = [
 # Pairs who must not draw each other, either way round (e.g. partners).
 EXCLUDED_PAIRS = [
     # ('Alex', 'Debbie'),
+    ('Chris', 'Debbie'),
+    ('Glen', 'Jess'),
 ]
 
 # Where each run's folder goes. --output overrides it for one run. If the
@@ -43,7 +45,7 @@ OUTPUT_DIR = r'G:\My Drive\Secret-Santa'
 # inside the output folder, such as '2025/12.01-19.30', or a full path such
 # as 'D:/Old/2025/12.01-19.30'. Use forward slashes. Each run prints the
 # value to use next time. None to skip.
-PREVIOUS_DRAW = None
+PREVIOUS_DRAW = Path(r'G:\My Drive\Secret-Santa\2025')
 
 # read_draw() finds the receiver in old files by "give a gift to <name>." at
 # the end of a line, so keep that if you change the message (put anything
