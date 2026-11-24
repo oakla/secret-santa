@@ -5,7 +5,7 @@ Edit the settings below, then run:
     python secret_santa.py
 
 Each run writes one file per person to a new folder inside OUTPUT_DIR, such
-as 2026-11-24_153012\Alex.txt, for you to send on. To use another folder
+as 2026\11.24-15.30\Alex.txt, for you to send on. To use another folder
 for one run:
 
     python secret_santa.py --output "D:\Somewhere else"
@@ -35,14 +35,15 @@ EXCLUDED_PAIRS = [
     # ('Alex', 'Debbie'),
 ]
 
-# Where each run's folder goes. --output overrides it for one run.
+# Where each run's folder goes. --output overrides it for one run. If the
+# folder can't be found (e.g. Google Drive isn't running), the script asks.
 OUTPUT_DIR = r'G:\My Drive\Secret-Santa'
 
-# The last draw you sent, so nobody gets the same person again: a folder in
-# the output folder, or a full path. Each run prints the value to use next
-# time. For last year's draw, put its files in a folder called 2025 in the
-# output folder. None to skip.
-PREVIOUS_DRAW = None  # e.g. '2025'
+# The last draw you sent, so nobody gets the same person again: its folder
+# inside the output folder, such as '2025/12.01-19.30' (use forward
+# slashes), or a full path. Each run prints the value to use next time.
+# None to skip.
+PREVIOUS_DRAW = None
 
 # read_draw() finds the receiver in old files by "give a gift to <name>." at
 # the end of a line, so keep that if you change the message (put anything
@@ -146,11 +147,30 @@ def message(giver, receiver, people):
     return text + ' ' * (width - size(text))
 
 
+def choose_output(folder):
+    """Return folder if it exists, otherwise ask where to save instead."""
+    while not folder.is_dir():
+        print(f"Can't find the folder {folder}")
+        try:
+            answer = input('Where should the files go? Type a folder, or press Enter to quit: ')
+        except (EOFError, KeyboardInterrupt):
+            answer = ''
+        answer = answer.strip().strip('"')  # Explorer's "Copy as path" adds quotes
+        if not answer:
+            raise DrawError('No output folder chosen.')
+        folder = Path(answer).expanduser()
+        if not folder.exists() and folder.parent.is_dir():
+            folder.mkdir()
+    return folder
+
+
 def make_run_folder(parent):
-    stamp = datetime.now().strftime('%Y-%m-%d_%H%M%S')
-    folder, n = parent / stamp, 2
-    while folder.exists():
-        folder, n = parent / f'{stamp}_{n}', n + 1
+    """Make a new folder for this run, such as parent/2026/11.24-15.30."""
+    now = datetime.now()
+    year, stamp = parent / now.strftime('%Y'), now.strftime('%m.%d-%H.%M')
+    folder, n = year / stamp, 2
+    while folder.exists():  # another run in the same minute
+        folder, n = year / f'{stamp}_{n}', n + 1
     folder.mkdir(parents=True)
     return folder
 
@@ -161,11 +181,13 @@ def main(argv=None):
     parser.add_argument('--output', metavar='FOLDER', default=OUTPUT_DIR,
                         help='folder to put this run in (default: %(default)s)')
     output = Path(parser.parse_args(argv).output)
-    previous_folder = output / PREVIOUS_DRAW if PREVIOUS_DRAW else None
     try:
-        if not output.is_dir():
-            raise DrawError(f"Can't find the output folder {output}. "
-                            'Create it, or choose another with --output FOLDER.')
+        if PREVIOUS_DRAW and any(ord(c) < 32 for c in PREVIOUS_DRAW):
+            # e.g. '2025\12.01' in a normal string, where \12 is a newline
+            raise DrawError('Write PREVIOUS_DRAW with forward slashes, '
+                            "like '2025/12.01-19.30'.")
+        output = choose_output(output)
+        previous_folder = output / PREVIOUS_DRAW if PREVIOUS_DRAW else None
         previous = read_draw(previous_folder) if previous_folder else {}
         banned = banned_pairs(PARTICIPANTS, EXCLUDED_PAIRS, previous)
         draw, count = make_draw(PARTICIPANTS, banned)
@@ -195,7 +217,7 @@ def main(argv=None):
         text = message(giver, draw[giver], PARTICIPANTS)
         (folder / f'{giver}.txt').write_text(text, encoding='utf-8')
     print(f'Wrote {len(draw)} files to {folder}')
-    print(f"Next time, set PREVIOUS_DRAW = '{folder.name}'")
+    print(f"Next time, set PREVIOUS_DRAW = '{folder.relative_to(output).as_posix()}'")
 
 
 if __name__ == '__main__':

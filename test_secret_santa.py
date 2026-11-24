@@ -129,6 +129,9 @@ class FileTests(unittest.TestCase):
     def test_new_folder_every_run(self):
         folders = {ss.make_run_folder(self.tmp) for _ in range(3)}
         self.assertEqual(len(folders), 3)
+        for folder in folders:  # e.g. 2026/11.24-15.30, then _2 and _3
+            self.assertRegex(folder.relative_to(self.tmp).as_posix(),
+                             r'^\d{4}/\d\d\.\d\d-\d\d\.\d\d(_\d)?$')
 
     def run_main(self, *args, **settings):
         # Don't depend on whatever the real settings are this year.
@@ -141,31 +144,52 @@ class FileTests(unittest.TestCase):
 
     def test_main_never_repeats_previous_draw(self):
         out = self.run_main()
-        [first] = self.tmp.iterdir()
-        self.assertIn(f"PREVIOUS_DRAW = '{first.name}'", out)
+        [first] = self.tmp.glob('*/*')
+        name = first.relative_to(self.tmp).as_posix()
+        self.assertIn(f"PREVIOUS_DRAW = '{name}'", out)
         previous = ss.read_draw(first)
         self.assertEqual(sorted(previous), sorted(PEOPLE))
         for _ in range(10):
-            out = self.run_main(PREVIOUS_DRAW=first.name)
+            out = self.run_main(PREVIOUS_DRAW=name)
             self.assertIn('Avoiding repeats', out)
-        for folder in self.tmp.iterdir():
+        for folder in self.tmp.glob('*/*'):
             if folder != first:
                 draw = ss.read_draw(folder)
                 self.assertFalse(set(draw.items()) & set(previous.items()))
-        self.assertEqual(len(list(self.tmp.iterdir())), 11)
+        self.assertEqual(len(list(self.tmp.glob('*/*'))), 11)
+
+    def test_previous_draw_with_backslashes(self):
+        with self.assertRaises(SystemExit) as caught:
+            self.run_main(PREVIOUS_DRAW='2025\12.01-19.30')  # \12 is a newline
+        self.assertIn('forward slashes', str(caught.exception))
 
     def test_output_option(self):
         other = self.tmp / 'other'
         other.mkdir()
         self.run_main('--output', str(other))
         self.assertEqual(list(self.tmp.iterdir()), [other])
-        [folder] = other.iterdir()
+        [folder] = other.glob('*/*')
         self.assertEqual(sorted(ss.read_draw(folder)), sorted(PEOPLE))
 
-    def test_missing_output_folder(self):
-        with self.assertRaises(SystemExit) as caught:
-            self.run_main(OUTPUT_DIR=str(self.tmp / 'nope'))
-        self.assertIn("Can't find the output folder", str(caught.exception))
+    def test_missing_output_folder_asks(self):
+        missing = str(self.tmp / 'no-drive' / 'Secret-Santa')
+        new = self.tmp / 'new'
+        # a folder that can't be made, then a new one (with quotes, as
+        # Explorer's "Copy as path" gives)
+        with mock.patch('builtins.input', side_effect=[missing, f'"{new}"']) as ask:
+            out = self.run_main(OUTPUT_DIR=missing)
+        self.assertEqual(ask.call_count, 2)
+        self.assertIn(f"PREVIOUS_DRAW = '", out)
+        self.assertEqual(len(list(new.glob('*/*/*.txt'))), len(PEOPLE))
+        self.assertEqual(list(self.tmp.iterdir()), [new])
+
+    def test_missing_output_folder_quit(self):
+        for answers in ([''], EOFError):
+            with self.subTest(answers=answers), \
+                    mock.patch('builtins.input', side_effect=answers), \
+                    self.assertRaises(SystemExit) as caught:
+                self.run_main(OUTPUT_DIR=str(self.tmp / 'nope'))
+            self.assertIn('No output folder chosen', str(caught.exception))
         self.assertEqual(list(self.tmp.iterdir()), [])
 
     def test_files_written_in_list_order(self):
