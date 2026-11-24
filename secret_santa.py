@@ -29,8 +29,10 @@ EXCLUDED_PAIRS = [
     # ('Alex', 'Debbie'),
 ]
 
-# Folder holding a previous draw's files (e.g. last year's), so nobody gets
-# the same person again. None to skip.
+# Folder of the last draw you sent, so nobody gets the same person again.
+# Each run prints the value to use next time. Last year's script wrote its
+# files straight into output/: move them into output/2025 and use that.
+# None to skip.
 PREVIOUS_DRAW = None  # e.g. 'output/2025'
 
 # True: everyone is in one big loop, so no two people give to each other.
@@ -39,10 +41,11 @@ PREVIOUS_DRAW = None  # e.g. 'output/2025'
 # exclusions: with too few, people can work out who has whom.
 SINGLE_LOOP = False
 
-OUTPUT_DIR = Path('output')
+OUTPUT_DIR = 'output'
 
-# read_draw() finds the receiver in old files by the words "give a gift to
-# <name>.", so keep them if you change the message.
+# read_draw() finds the receiver in old files by "give a gift to <name>." at
+# the end of a line, so keep that if you change the message (put anything
+# else on a line of its own).
 MESSAGE = 'Hello {giver}!\n\nYou have been assigned to give a gift to {receiver}.\n'
 
 # Up to this many candidate draws, all are checked: the pick is exact and the
@@ -119,6 +122,11 @@ def read_draw(folder):
             draw[path.stem] = match.group(1)
     if not draw:
         raise DrawError(f'No previous draw found in {folder}')
+    # Everyone who received a gift also gave one, so has a file too.
+    missing = set(draw.values()) - set(draw)
+    if missing:
+        raise DrawError(f'The previous draw in {folder} has no file for: '
+                        + ', '.join(sorted(missing)))
     return draw
 
 
@@ -128,6 +136,10 @@ def banned_pairs(people, excluded_pairs, previous):
         raise DrawError('Need at least two participants.')
     if len(set(people)) != len(people):
         raise DrawError('Each participant needs a different name.')
+    for pair in excluded_pairs:
+        if isinstance(pair, str) or len(pair) != 2:
+            raise DrawError("Each EXCLUDED_PAIRS entry should be two names, "
+                            f"like ('Alex', 'Debbie'), not {pair!r}")
     unknown = {name for pair in excluded_pairs for name in pair} - set(people)
     if unknown:
         raise DrawError('EXCLUDED_PAIRS has names that are not in PARTICIPANTS: '
@@ -136,6 +148,16 @@ def banned_pairs(people, excluded_pairs, previous):
     for a, b in excluded_pairs:
         banned |= {(a, b), (b, a)}
     return banned
+
+
+def message(giver, receiver, people):
+    """The giver's message, padded with trailing spaces to the same size
+    whoever they drew, so file sizes don't hint at who has whom."""
+    def size(text):
+        return len(text.encode('utf-8'))
+    text = MESSAGE.format(giver=giver, receiver=receiver)
+    width = max(size(MESSAGE.format(giver=giver, receiver=other)) for other in people)
+    return text + ' ' * (width - size(text))
 
 
 def make_run_folder(parent):
@@ -155,23 +177,31 @@ def main():
     except DrawError as error:
         sys.exit(str(error))
 
-    gone = (set(previous) | set(previous.values())) - set(PARTICIPANTS)
-    if gone:
-        print('Not in this draw, so ignored from the previous one: ' + ', '.join(sorted(gone)))
-
-    folder = make_run_folder(OUTPUT_DIR)
-    # Write in list order, not draw order: file times would otherwise give
-    # away the chain of who has whom.
-    for giver in PARTICIPANTS:
-        text = MESSAGE.format(giver=giver, receiver=draw[giver])
-        (folder / f'{giver}.txt').write_text(text, encoding='utf-8')
-    print(f'Wrote {len(draw)} files to {folder}')
+    if previous:
+        print(f'Avoiding repeats of the draw in {PREVIOUS_DRAW}')
+        gone = set(previous) - set(PARTICIPANTS)
+        new = set(PARTICIPANTS) - set(previous)
+        if gone:
+            print('In that draw but not this one: ' + ', '.join(sorted(gone)))
+        if new:
+            print('Not in that draw: ' + ', '.join(sorted(new))
+                  + " (if that's a new spelling, use the old one)")
 
     if count is not None:
         print(f'Picked at random from {count} possible draws.')
         if count <= FEW_DRAWS:
-            print('That is very few: people may be able to work out who has whom. '
-                  'Fewer exclusions would help.')
+            tip = ('Setting SINGLE_LOOP = False or removing exclusions would help.'
+                   if SINGLE_LOOP else 'Fewer exclusions would help.')
+            print(f'That is very few: people may be able to work out who has whom. {tip}')
+
+    folder = make_run_folder(Path(OUTPUT_DIR))
+    # Write in list order, not draw order: file times would otherwise give
+    # away the chain of who has whom.
+    for giver in PARTICIPANTS:
+        text = message(giver, draw[giver], PARTICIPANTS)
+        (folder / f'{giver}.txt').write_text(text, encoding='utf-8')
+    print(f'Wrote {len(draw)} files to {folder}')
+    print(f"Next time, set PREVIOUS_DRAW = '{folder.as_posix()}'")
 
 
 if __name__ == '__main__':

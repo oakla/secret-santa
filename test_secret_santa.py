@@ -82,10 +82,22 @@ class DrawTests(unittest.TestCase):
             ss.banned_pairs(['Alex'], [], {})
         with self.assertRaises(ss.DrawError):
             ss.banned_pairs(PEOPLE, [('Alex', 'Debby')], {})
+        # a pair without the outer list, a missing comma, and a group of three
+        for entry in ['Alex', 'AlexDebbie', ('Alex', 'Chris', 'Debbie')]:
+            with self.assertRaises(ss.DrawError):
+                ss.banned_pairs(PEOPLE, [entry], {})
 
     def test_banned_pairs(self):
         banned = ss.banned_pairs(PEOPLE, [('Alex', 'Debbie')], {'Glen': 'Jess'})
         self.assertEqual(banned, {('Alex', 'Debbie'), ('Debbie', 'Alex'), ('Glen', 'Jess')})
+
+
+    def test_same_size_whoever_is_drawn(self):
+        people = PEOPLE + ['Zoë']
+        for giver in people:
+            sizes = {len(ss.message(giver, receiver, people).encode('utf-8'))
+                     for receiver in people}
+            self.assertEqual(len(sizes), 1)
 
 
 class FileTests(unittest.TestCase):
@@ -96,21 +108,30 @@ class FileTests(unittest.TestCase):
 
     def test_reads_last_years_files(self):
         # Exactly what last year's script wrote.
-        for giver, receiver in [('Alex', 'Chris'), ('Chris', 'J. Smith')]:
+        draw = {'Alex': 'J. Smith', 'J. Smith': 'Chris', 'Chris': 'Alex'}
+        for giver, receiver in draw.items():
             with open(os.path.join(self.tmp, f'{giver}.txt'), 'w') as f:
                 f.write(f'Hello {giver}!\n\nYou have been assigned to give a gift to {receiver}.\n')
-        self.assertEqual(ss.read_draw(self.tmp), {'Alex': 'Chris', 'Chris': 'J. Smith'})
+        self.assertEqual(ss.read_draw(self.tmp), draw)
 
     def test_missing_previous_draw(self):
         with self.assertRaises(ss.DrawError):
             ss.read_draw(self.tmp / 'nope')
+
+    def test_previous_draw_missing_a_file(self):
+        (self.tmp / 'Alex.txt').write_text(ss.message('Alex', 'Chris', PEOPLE))
+        with self.assertRaises(ss.DrawError):
+            ss.read_draw(self.tmp)
 
     def test_new_folder_every_run(self):
         folders = {ss.make_run_folder(self.tmp) for _ in range(3)}
         self.assertEqual(len(folders), 3)
 
     def run_main(self, **settings):
-        with mock.patch.multiple(ss, OUTPUT_DIR=self.tmp, **settings), \
+        # Don't depend on whatever the real settings are this year.
+        settings = {'PARTICIPANTS': PEOPLE, 'EXCLUDED_PAIRS': [], 'PREVIOUS_DRAW': None,
+                    'SINGLE_LOOP': False, 'OUTPUT_DIR': self.tmp, **settings}
+        with mock.patch.multiple(ss, **settings), \
                 contextlib.redirect_stdout(io.StringIO()) as out:
             ss.main()
         return out.getvalue()
@@ -119,14 +140,33 @@ class FileTests(unittest.TestCase):
         self.run_main()
         [first] = self.tmp.iterdir()
         previous = ss.read_draw(first)
-        self.assertEqual(sorted(previous), sorted(ss.PARTICIPANTS))
+        self.assertEqual(sorted(previous), sorted(PEOPLE))
         for _ in range(10):
-            self.run_main(PREVIOUS_DRAW=first)
+            out = self.run_main(PREVIOUS_DRAW=first)
+            self.assertIn('Avoiding repeats', out)
         for folder in self.tmp.iterdir():
             if folder != first:
                 draw = ss.read_draw(folder)
                 self.assertFalse(set(draw.items()) & set(previous.items()))
         self.assertEqual(len(list(self.tmp.iterdir())), 11)
+
+    def test_files_written_in_list_order(self):
+        written = []
+        write_text = Path.write_text
+
+        def record(path, *args, **kwargs):
+            written.append(path.stem)
+            return write_text(path, *args, **kwargs)
+
+        with mock.patch.object(Path, 'write_text', record):
+            self.run_main(SINGLE_LOOP=True)
+        self.assertEqual(written, PEOPLE)
+
+    def test_warns_when_few_draws(self):
+        out = self.run_main(SINGLE_LOOP=True, FEW_DRAWS=100)
+        self.assertIn('very few', out)
+        self.assertIn('SINGLE_LOOP = False', out)
+        self.assertNotIn('very few', self.run_main())
 
     def test_main_reports_impossible(self):
         with self.assertRaises(SystemExit) as caught:
