@@ -1,202 +1,229 @@
-"""Draw Secret Santa names and email everyone their assignment.
+r"""Secret santa draw.
 
-  python secret_santa.py draw   write one email per person to output/
-  python secret_santa.py send   send them over SMTP (or open each .eml and send it yourself)
+Edit the settings below, then run:
 
-Assignments only ever appear inside the email attachments: never in subjects,
-email bodies, file names or terminal output. See README.md for setup.
+    python secret_santa.py
+
+Each run writes one file per person to a new folder inside OUTPUT_DIR, such
+as 2026\11.24-15.30\Alex.txt, for you to send on. To use another folder
+for one run:
+
+    python secret_santa.py --output "D:\Somewhere else"
+
+Nobody draws themselves, no two people draw each other, and the script
+never prints who has whom.
 """
 import argparse
-import csv
-import getpass
-import os
+import itertools
+import math
 import random
 import re
-import smtplib
-import ssl
 import sys
-from email import policy
-from email.message import EmailMessage
-from email.parser import BytesParser
-from email.utils import formataddr, formatdate, make_msgid, parseaddr
+from datetime import datetime
 from pathlib import Path
 
-PARTICIPANTS = Path('participants.csv')
-OUTDIR = Path('output')
-SENTDIR = OUTDIR / 'sent'
+PARTICIPANTS = [
+    'Alex',
+    'Chris',
+    'Debbie',
+    'Glen',
+    'Jess',
+]
 
-SUBJECT = 'Your Secret Santa assignment'
-BODY = """\
-Hi {giver},
+# Pairs who must not draw each other, either way round (e.g. partners).
+EXCLUDED_PAIRS = [
+    # ('Alex', 'Debbie'),
+    ('Chris', 'Debbie'),
+    ('Glen', 'Jess'),
+]
 
-Your Secret Santa assignment is in the attached file. Open it when nobody
-else can see your screen.
-"""
-ATTACHMENT_NAME = 'secret-santa.txt'
-ATTACHMENT = """\
-Hello {giver}!
+# Where each run's folder goes. --output overrides it for one run. If the
+# folder can't be found (e.g. Google Drive isn't running), the script asks.
+OUTPUT_DIR = r'G:\My Drive\Secret-Santa'
 
-You have been assigned to give a gift to {receiver}.
-"""
+# The last draw you sent, so nobody gets the same person again: its folder
+# inside the output folder, such as '2025/12.01-19.30', or a full path such
+# as 'D:/Old/2025/12.01-19.30'. Use forward slashes. Each run prints the
+# value to use next time. None to skip.
+PREVIOUS_DRAW = Path(r'G:\My Drive\Secret-Santa\2025')
+
+# read_draw() finds the receiver in old files by "give a gift to <name>." at
+# the end of a line, so keep that if you change the message (put anything
+# else on a line of its own).
+MESSAGE = 'Hello {giver}!\n\nYou have been assigned to give a gift to {receiver}.\n'
+
+# Up to this many candidate draws (9 people), all are checked: the pick is
+# exact and the script can say how many draws were possible. With more people
+# it makes random draws until one fits, up to MAX_TRIES times.
+MAX_CANDIDATES_TO_CHECK = 500_000
+MAX_TRIES = 100_000
+
+# Warn when this few draws (or fewer) fit the exclusions.
+FEW_DRAWS = 5
 
 
-def read_participants(path):
-    """Return {name: email} from a CSV file with name and email columns."""
-    try:
-        with open(path, newline='', encoding='utf-8-sig') as f:
-            reader = csv.DictReader(f)
-            reader.fieldnames = [h.strip().lower() for h in reader.fieldnames or []]
-            if not {'name', 'email'} <= set(reader.fieldnames):
-                sys.exit(f'{path} needs a header row: name,email')
-            rows = [((row['name'] or '').strip(), (row['email'] or '').strip()) for row in reader]
-    except FileNotFoundError:
-        sys.exit(f'{path} not found. Copy participants.example.csv to {path} and fill it in.')
+class DrawError(Exception):
+    pass
 
-    people = {}
-    for name, email in rows:
-        if not (name or email):
-            continue
-        if not name or not re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', email):
-            sys.exit(f'{path}: every row needs a name and a valid email address, got {name!r}, {email!r}')
-        for other, other_email in people.items():
-            if eml_name(other).casefold() == eml_name(name).casefold():
-                sys.exit(f'{path}: {other!r} and {name!r} need more distinct names')
-            if other_email.casefold() == email.casefold():
-                sys.exit(f"{path}: {other} and {name} share an email address, so they would see each other's assignment")
-        people[name] = email
+
+def allowed(draw, banned):
+    """Nobody draws themselves, no two people draw each other, and no banned
+    (giver, receiver) pair is used."""
+    return all(receiver != giver and draw[receiver] != giver
+               and (giver, receiver) not in banned
+               for giver, receiver in draw.items())
+
+
+def make_draw(people, banned, rng=random):
+    """Pick at random, all equally likely, one of the allowed draws.
+
+    Returns (draw, count): draw is {giver: receiver}, and count is how many
+    draws were possible, or None if there were too many to check. Raises
+    DrawError if none fit.
+    """
+    if math.factorial(len(people)) <= MAX_CANDIDATES_TO_CHECK:
+        chosen, count = None, 0
+        for receivers in itertools.permutations(people):
+            draw = dict(zip(people, receivers))
+            if allowed(draw, banned):
+                count += 1
+                if rng.randrange(count) == 0:  # keeps each with chance 1/count
+                    chosen = draw
+        if chosen is None:
+            raise DrawError('No draw fits these exclusions. Remove some and try again.')
+        return chosen, count
+    receivers = list(people)
+    for _ in range(MAX_TRIES):
+        rng.shuffle(receivers)
+        draw = dict(zip(people, receivers))
+        if allowed(draw, banned):
+            return draw, None
+    raise DrawError("Couldn't find a draw that fits these exclusions. Try removing some.")
+
+
+def read_draw(folder):
+    """Read a draw back from its files, as {giver: receiver}."""
+    pattern = re.compile(r'give a gift to (.+)\.$', re.MULTILINE)
+    draw = {}
+    for path in Path(folder).glob('*.txt'):
+        match = pattern.search(path.read_text(encoding='utf-8'))
+        if match:
+            draw[path.stem] = match.group(1)
+    if not draw:
+        raise DrawError(f'No previous draw found in {folder}')
+    # Everyone who received a gift also gave one, so has a file too.
+    missing = set(draw.values()) - set(draw)
+    if missing:
+        raise DrawError(f'The previous draw in {folder} has no file for: '
+                        + ', '.join(sorted(missing)))
+    return draw
+
+
+def banned_pairs(people, excluded_pairs, previous):
+    """Return the (giver, receiver) pairs the draw must avoid."""
     if len(people) < 3:
-        sys.exit(f'{path}: Secret Santa needs at least 3 people')
-    return people
+        raise DrawError('Need at least three participants: two could only draw each other.')
+    if len(set(people)) != len(people):
+        raise DrawError('Each participant needs a different name.')
+    for pair in excluded_pairs:
+        if isinstance(pair, str) or len(pair) != 2:
+            raise DrawError("Each EXCLUDED_PAIRS entry should be two names, "
+                            f"like ('Alex', 'Debbie'), not {pair!r}")
+    unknown = {name for pair in excluded_pairs for name in pair} - set(people)
+    if unknown:
+        raise DrawError('EXCLUDED_PAIRS has names that are not in PARTICIPANTS: '
+                        + ', '.join(sorted(unknown)))
+    banned = set(previous.items())
+    for a, b in excluded_pairs:
+        banned |= {(a, b), (b, a)}
+    return banned
 
 
-def eml_name(name):
-    """File name for someone's email, e.g. 'Mary Jane' -> 'Mary_Jane.eml'."""
-    return re.sub(r'[^\w-]+', '_', name).strip('_') + '.eml'
+def message(giver, receiver, people):
+    """The giver's message, padded with trailing spaces to the same size
+    whoever they drew, so file sizes don't hint at who has whom."""
+    def size(text):
+        return len(text.encode('utf-8'))
+    text = MESSAGE.format(giver=giver, receiver=receiver)
+    width = max(size(MESSAGE.format(giver=giver, receiver=other)) for other in people)
+    return text + ' ' * (width - size(text))
 
 
-def draw(names):
-    """Put everyone in one random circle; each person gives to the next."""
-    circle = random.sample(names, len(names))
-    return dict(zip(circle, circle[1:] + circle[:1]))
+def choose_output(folder):
+    """Return folder if it exists, otherwise ask where to save instead."""
+    while not folder.is_dir():
+        print(f"Can't find the folder {folder}")
+        try:
+            answer = input('Where should the files go? Type a folder, or press Enter to quit: ')
+        except (EOFError, KeyboardInterrupt):
+            answer = ''
+        answer = answer.strip().strip('"')  # Explorer's "Copy as path" adds quotes
+        if not answer:
+            raise DrawError('No output folder chosen.')
+        folder = Path(answer).expanduser()
+        if not folder.exists() and folder.parent.is_dir():
+            folder.mkdir()
+    return folder
 
 
-def build_email(giver, email, receiver):
-    msg = EmailMessage(policy=policy.SMTP.clone(cte_type='7bit'))
-    msg['To'] = formataddr((giver, email))
-    msg['Subject'] = SUBJECT
-    msg['X-Unsent'] = '1'  # makes Outlook open the .eml as a draft
-    msg.set_content(BODY.format(giver=giver))
-    # base64 keeps the name unreadable if the .eml is opened in a text editor
-    msg.add_attachment(ATTACHMENT.format(giver=giver, receiver=receiver),
-                       filename=ATTACHMENT_NAME, cte='base64')
-    return msg
+def make_run_folder(parent):
+    """Make a new folder for this run, such as parent/2026/11.24-15.30."""
+    now = datetime.now()
+    year, stamp = parent / now.strftime('%Y'), now.strftime('%m.%d-%H.%M')
+    folder, n = year / stamp, 2
+    while folder.exists():  # another run in the same minute
+        folder, n = year / f'{stamp}_{n}', n + 1
+    folder.mkdir(parents=True)
+    return folder
 
 
-def cmd_draw(args):
-    people = read_participants(PARTICIPANTS)
-    if any(OUTDIR.glob('*.eml')) or any(SENTDIR.glob('*.eml')):
-        sys.exit(f'{OUTDIR}/ already holds a draw. Delete it if you really want to draw again.')
-    pairs = draw(list(people))
-    OUTDIR.mkdir(exist_ok=True)
-    # Write in participant order: writing in circle order would leak the
-    # assignments through file timestamps.
-    for giver, email in people.items():
-        (OUTDIR / eml_name(giver)).write_bytes(build_email(giver, email, pairs[giver]).as_bytes())
-    print(f'Wrote emails for {len(people)} people to {OUTDIR}/. Open each .eml in your mail app\n'
-          'and send it, or see: python secret_santa.py send --help')
-
-
-def find_emails(names):
-    """Unsent emails, or the named people's emails whether sent or not."""
-    unsent = sorted(OUTDIR.glob('*.eml'))
-    sent = sorted(SENTDIR.glob('*.eml'))
-    if not (unsent or sent):
-        sys.exit(f'No emails in {OUTDIR}/. Run draw first.')
-    if not names:
-        if not unsent:
-            sys.exit('Every email has been sent. To resend one, name the person: send NAME')
-        return unsent
-    by_name = {path.name.casefold(): path for path in sent + unsent}
-    picked = {}
-    for name in names:
-        path = by_name.get(eml_name(name).casefold())
-        if path is None:
-            choices = ', '.join(sorted(path.stem for path in by_name.values()))
-            sys.exit(f'No email for {name!r}. Choose from: {choices}')
-        picked[path] = None
-    return list(picked)
-
-
-def connect(host, port, user, password):
-    context = ssl.create_default_context()
-    if port == 465:
-        smtp = smtplib.SMTP_SSL(host, port, context=context, timeout=60)
-    else:
-        smtp = smtplib.SMTP(host, port, timeout=60)
-        smtp.starttls(context=context)
-    smtp.login(user, password)
-    return smtp
-
-
-def cmd_send(args):
-    paths = find_emails(args.names)
-    if not (args.host and args.user):
-        sys.exit('send needs --host and --user (or SMTP_HOST and SMTP_USER). See send --help.')
-    messages = []
-    for path in paths:
-        with open(path, 'rb') as f:
-            messages.append((path, BytesParser(policy=policy.default).parse(f)))
-    sender = args.sender or args.user
-    print(f'From {sender} via {args.host}:{args.port} to:')
-    for _, msg in messages:
-        print(f'  {msg["To"]}')
-    if input(f'Send {len(messages)} email(s)? [y/N] ').strip().lower() not in ('y', 'yes'):
-        sys.exit('Nothing sent.')
-    password = os.environ.get('SMTP_PASSWORD') or getpass.getpass(f'Password for {args.user}: ')
-
-    SENTDIR.mkdir(parents=True, exist_ok=True)
-    domain = parseaddr(sender)[1].rpartition('@')[2] or None
-    done = 0
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description='Secret santa draw. The other settings are at the top of this file.')
+    parser.add_argument('--output', metavar='FOLDER', default=OUTPUT_DIR,
+                        help='folder to put this run in (default: %(default)s)')
+    output = Path(parser.parse_args(argv).output)
+    previous_name = str(PREVIOUS_DRAW) if PREVIOUS_DRAW else None
     try:
-        with connect(args.host, args.port, args.user, password) as smtp:
-            for path, msg in messages:
-                del msg['X-Unsent']
-                for header, value in [('From', sender), ('Date', formatdate(localtime=True)),
-                                      ('Message-ID', make_msgid(domain=domain))]:
-                    del msg[header]
-                    msg[header] = value
-                smtp.send_message(msg)
-                if path.parent != SENTDIR:
-                    path.replace(SENTDIR / path.name)
-                done += 1
-                print(f'Sent to {msg["To"]}')
-    except smtplib.SMTPAuthenticationError as e:
-        sys.exit(f'Login failed: {e}\nGmail needs an app password, see README.md.')
-    except (smtplib.SMTPException, OSError) as e:
-        sys.exit(f'Stopped after sending {done} of {len(messages)}: {e}\n'
-                 'Fix the problem and run the same command again.')
+        if previous_name and not previous_name.isprintable():
+            # Backslashes in a normal string can turn into other characters:
+            # in '2025\12.01', \12 becomes a newline.
+            raise DrawError('Write PREVIOUS_DRAW with forward slashes, '
+                            "like '2025/12.01-19.30'.")
+        output = choose_output(output)
+        previous_folder = output / previous_name if previous_name else None
+        previous = read_draw(previous_folder) if previous_folder else {}
+        banned = banned_pairs(PARTICIPANTS, EXCLUDED_PAIRS, previous)
+        draw, count = make_draw(PARTICIPANTS, banned)
+    except DrawError as error:
+        sys.exit(str(error))
 
+    if previous:
+        print(f'Avoiding repeats of the draw in {previous_folder}')
+        gone = set(previous) - set(PARTICIPANTS)
+        new = set(PARTICIPANTS) - set(previous)
+        if gone:
+            print('In that draw but not this one: ' + ', '.join(sorted(gone)))
+        if new:
+            print('Not in that draw: ' + ', '.join(sorted(new))
+                  + " (if that's a new spelling, use the old one)")
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
-    commands = parser.add_subparsers(dest='command', required=True)
-    commands.add_parser('draw', help=f'draw names from {PARTICIPANTS} and write the emails')
-    send = commands.add_parser(
-        'send', help='send the emails over SMTP',
-        description='Send the emails in output/ over SMTP, moving each to output/sent/ once sent. '
-                    'The password comes from SMTP_PASSWORD or a prompt.')
-    send.add_argument('names', nargs='*', help="only send (or resend) these people's emails")
-    send.add_argument('--host', default=os.environ.get('SMTP_HOST'),
-                      help='SMTP server, e.g. smtp.gmail.com (env SMTP_HOST)')
-    send.add_argument('--port', type=int, default=int(os.environ.get('SMTP_PORT', 587)),
-                      help='587 for STARTTLS or 465 for SSL (env SMTP_PORT, default 587)')
-    send.add_argument('--user', default=os.environ.get('SMTP_USER'),
-                      help='SMTP login, usually your email address (env SMTP_USER)')
-    send.add_argument('--from', dest='sender', default=os.environ.get('SMTP_FROM'),
-                      help='From address, if not the --user address (env SMTP_FROM)')
-    args = parser.parse_args()
-    {'draw': cmd_draw, 'send': cmd_send}[args.command](args)
+    if count is not None:
+        print(f'Picked at random from {count} possible draws.')
+        if count <= FEW_DRAWS:
+            print('That is very few: people may be able to work out who has whom. '
+                  'Fewer exclusions would help.')
+
+    folder = make_run_folder(output)
+    # Write in list order, not draw order: file times would otherwise give
+    # away the chain of who has whom.
+    for giver in PARTICIPANTS:
+        text = message(giver, draw[giver], PARTICIPANTS)
+        (folder / f'{giver}.txt').write_text(text, encoding='utf-8')
+    print(f'Wrote {len(draw)} files to {folder}')
+    # The short form only works if next time's files go to the same place.
+    hint = folder.relative_to(output) if output == Path(OUTPUT_DIR) else folder.resolve()
+    print(f"Next time, set PREVIOUS_DRAW = '{hint.as_posix()}'")
 
 
 if __name__ == '__main__':
