@@ -1,39 +1,178 @@
+"""Secret santa draw.
+
+Edit the settings below, then run:
+
+    python secret_santa.py
+
+Each run writes one file per person to a new folder, such as
+output/2026-11-24_153012/Alex.txt, for you to send on. It never prints
+who has whom.
+"""
+import itertools
+import math
 import random
-import os
+import re
+import sys
 from datetime import datetime
+from pathlib import Path
 
-# each run gets its own folder, e.g. output/2026-11-24_153012/
-OUTDIR = os.path.join('output', datetime.now().strftime('%Y-%m-%d_%H%M%S'))
-os.makedirs(OUTDIR)
-
-participants = [
+PARTICIPANTS = [
     'Alex',
     'Chris',
     'Debbie',
     'Glen',
-    'Jess'
+    'Jess',
 ]
 
-pairs = {}
+# Pairs who must not draw each other, either way round (e.g. partners).
+EXCLUDED_PAIRS = [
+    # ('Alex', 'Debbie'),
+]
 
-# choose random first partipant
-first = random.choice(participants)
-participants.remove(first)
+# Folder holding a previous draw's files (e.g. last year's), so nobody gets
+# the same person again. None to skip.
+PREVIOUS_DRAW = None  # e.g. 'output/2025'
 
-current = first
+# True: everyone is in one big loop, so no two people give to each other.
+# False: smaller loops are allowed too. Two people may then give to each
+# other, but there are more possible draws, which matters once you add
+# exclusions: with too few, people can work out who has whom.
+SINGLE_LOOP = False
 
-while participants:
-    # choose random second participant
-    second = random.choice(participants)
-    participants.remove(second)
+OUTPUT_DIR = Path('output')
 
-    # assign pair
-    pairs[current] = second
-    current = second
+# read_draw() finds the receiver in old files by the words "give a gift to
+# <name>.", so keep them if you change the message.
+MESSAGE = 'Hello {giver}!\n\nYou have been assigned to give a gift to {receiver}.\n'
 
-# complete the circle
-pairs[current] = first
+# Up to this many candidate draws, all are checked: the pick is exact and the
+# script can say how many draws were possible. Above it (about 10 people), it
+# makes random draws until one fits, up to MAX_TRIES times.
+MAX_CANDIDATES_TO_CHECK = 500_000
+MAX_TRIES = 100_000
 
-for giver, receiver in pairs.items():
-    with open(os.path.join(OUTDIR, f'{giver}.txt'), 'w') as f:
-        f.write(f'Hello {giver}!\n\nYou have been assigned to give a gift to {receiver}.\n')
+# Warn when this few draws (or fewer) fit the exclusions.
+FEW_DRAWS = 5
+
+
+class DrawError(Exception):
+    pass
+
+
+def allowed(draw, banned):
+    return all(giver != receiver and (giver, receiver) not in banned
+               for giver, receiver in draw.items())
+
+
+def candidate_draws(people, single_loop):
+    """Yield every possible draw, as {giver: receiver}."""
+    if single_loop:
+        first, *rest = people
+        for order in itertools.permutations(rest):
+            loop = (first, *order)
+            yield dict(zip(loop, loop[1:] + loop[:1]))
+    else:
+        for receivers in itertools.permutations(people):
+            yield dict(zip(people, receivers))
+
+
+def random_candidate(people, single_loop, rng):
+    order = list(people)
+    rng.shuffle(order)
+    if single_loop:
+        return dict(zip(order, order[1:] + order[:1]))
+    return dict(zip(people, order))
+
+
+def make_draw(people, banned, single_loop, rng=random):
+    """Pick at random, all equally likely, one of the draws that avoid the
+    banned (giver, receiver) pairs.
+
+    Returns (draw, count), where count is how many draws were possible, or
+    None if there were too many to check. Raises DrawError if none fit.
+    """
+    candidates = math.factorial(len(people) - 1 if single_loop else len(people))
+    if candidates <= MAX_CANDIDATES_TO_CHECK:
+        chosen, count = None, 0
+        for draw in candidate_draws(people, single_loop):
+            if allowed(draw, banned):
+                count += 1
+                if rng.randrange(count) == 0:  # keeps each with chance 1/count
+                    chosen = draw
+        if chosen is None:
+            raise DrawError('No draw fits these exclusions. Remove some and try again.')
+        return chosen, count
+    for _ in range(MAX_TRIES):
+        draw = random_candidate(people, single_loop, rng)
+        if allowed(draw, banned):
+            return draw, None
+    raise DrawError("Couldn't find a draw that fits these exclusions. Try removing some.")
+
+
+def read_draw(folder):
+    """Read a draw back from its files, as {giver: receiver}."""
+    pattern = re.compile(r'give a gift to (.+)\.$', re.MULTILINE)
+    draw = {}
+    for path in Path(folder).glob('*.txt'):
+        match = pattern.search(path.read_text(encoding='utf-8'))
+        if match:
+            draw[path.stem] = match.group(1)
+    if not draw:
+        raise DrawError(f'No previous draw found in {folder}')
+    return draw
+
+
+def banned_pairs(people, excluded_pairs, previous):
+    """Return the (giver, receiver) pairs the draw must avoid."""
+    if len(people) < 2:
+        raise DrawError('Need at least two participants.')
+    if len(set(people)) != len(people):
+        raise DrawError('Each participant needs a different name.')
+    unknown = {name for pair in excluded_pairs for name in pair} - set(people)
+    if unknown:
+        raise DrawError('EXCLUDED_PAIRS has names that are not in PARTICIPANTS: '
+                        + ', '.join(sorted(unknown)))
+    banned = set(previous.items())
+    for a, b in excluded_pairs:
+        banned |= {(a, b), (b, a)}
+    return banned
+
+
+def make_run_folder(parent):
+    stamp = datetime.now().strftime('%Y-%m-%d_%H%M%S')
+    folder, n = parent / stamp, 2
+    while folder.exists():
+        folder, n = parent / f'{stamp}_{n}', n + 1
+    folder.mkdir(parents=True)
+    return folder
+
+
+def main():
+    try:
+        previous = read_draw(PREVIOUS_DRAW) if PREVIOUS_DRAW else {}
+        banned = banned_pairs(PARTICIPANTS, EXCLUDED_PAIRS, previous)
+        draw, count = make_draw(PARTICIPANTS, banned, SINGLE_LOOP)
+    except DrawError as error:
+        sys.exit(str(error))
+
+    gone = (set(previous) | set(previous.values())) - set(PARTICIPANTS)
+    if gone:
+        print('Not in this draw, so ignored from the previous one: ' + ', '.join(sorted(gone)))
+
+    folder = make_run_folder(OUTPUT_DIR)
+    # Write in list order, not draw order: file times would otherwise give
+    # away the chain of who has whom.
+    for giver in PARTICIPANTS:
+        text = MESSAGE.format(giver=giver, receiver=draw[giver])
+        (folder / f'{giver}.txt').write_text(text, encoding='utf-8')
+    print(f'Wrote {len(draw)} files to {folder}')
+
+    if count is not None:
+        print(f'Picked at random from {count} possible draws.')
+        if count <= FEW_DRAWS:
+            print('That is very few: people may be able to work out who has whom. '
+                  'Fewer exclusions would help.')
+
+
+if __name__ == '__main__':
+    main()
