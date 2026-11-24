@@ -15,71 +15,75 @@ PEOPLE = ['Alex', 'Chris', 'Debbie', 'Glen', 'Jess']
 LAST_YEAR = set(zip(PEOPLE, PEOPLE[1:] + PEOPLE[:1]))
 
 
-def loop_length(draw):
-    seen, person = set(), next(iter(draw))
-    while person not in seen:
-        seen.add(person)
-        person = draw[person]
-    return len(seen)
-
-
 class DrawTests(unittest.TestCase):
-    def assertValid(self, draw, banned, single_loop):
-        self.assertEqual(sorted(draw), sorted(PEOPLE))
-        self.assertEqual(sorted(draw.values()), sorted(PEOPLE))
+    def assertValid(self, draw, people, banned=()):
+        self.assertEqual(sorted(draw), sorted(people))
+        self.assertEqual(sorted(draw.values()), sorted(people))
         for giver, receiver in draw.items():
             self.assertNotEqual(giver, receiver)
+            self.assertNotEqual(draw[receiver], giver)  # nobody swaps
             self.assertNotIn((giver, receiver), banned)
-        if single_loop:
-            self.assertEqual(loop_length(draw), len(PEOPLE))
 
     def test_counts(self):
-        for banned, loops, any_shape in [(set(), 24, 44), (LAST_YEAR, 8, 13)]:
-            self.assertEqual(ss.make_draw(PEOPLE, banned, True)[1], loops)
-            self.assertEqual(ss.make_draw(PEOPLE, banned, False)[1], any_shape)
+        # With 5 people the only shape without swaps is one big loop.
+        self.assertEqual(ss.make_draw(PEOPLE, set())[1], 24)
+        self.assertEqual(ss.make_draw(PEOPLE, LAST_YEAR)[1], 8)
+        # With 6, two loops of 3 work too: 120 big loops + 40 pairs of loops.
+        self.assertEqual(ss.make_draw(PEOPLE + ['Sam'], set())[1], 160)
 
     def test_valid_and_evenly_spread(self):
         banned = LAST_YEAR | {('Alex', 'Debbie'), ('Debbie', 'Alex')}
-        for single_loop in (True, False):
-            possible = ss.make_draw(PEOPLE, banned, single_loop)[1]
-            # 0 forces the random-retry path used for big groups
-            for limit in (ss.MAX_CANDIDATES_TO_CHECK, 0):
-                with self.subTest(single_loop=single_loop, limit=limit), \
-                        mock.patch.object(ss, 'MAX_CANDIDATES_TO_CHECK', limit):
-                    rng = random.Random(1)
-                    runs = 1000 * possible
-                    seen = Counter()
-                    for _ in range(runs):
-                        draw, _ = ss.make_draw(PEOPLE, banned, single_loop, rng)
-                        self.assertValid(draw, banned, single_loop)
-                        seen[tuple(sorted(draw.items()))] += 1
-                    self.assertEqual(len(seen), possible)
-                    for times in seen.values():
-                        self.assertAlmostEqual(times / runs, 1 / possible, delta=0.3 / possible)
+        possible = ss.make_draw(PEOPLE, banned)[1]
+        # 0 forces the random-retry path used for big groups
+        for limit in (ss.MAX_CANDIDATES_TO_CHECK, 0):
+            with self.subTest(limit=limit), \
+                    mock.patch.object(ss, 'MAX_CANDIDATES_TO_CHECK', limit):
+                rng = random.Random(1)
+                runs = 1000 * possible
+                seen = Counter()
+                for _ in range(runs):
+                    draw, _ = ss.make_draw(PEOPLE, banned, rng)
+                    self.assertValid(draw, PEOPLE, banned)
+                    seen[tuple(sorted(draw.items()))] += 1
+                self.assertEqual(len(seen), possible)
+                for times in seen.values():
+                    self.assertAlmostEqual(times / runs, 1 / possible, delta=0.3 / possible)
+
+    def test_six_people_random_path(self):
+        people = PEOPLE + ['Sam']
+        rng = random.Random(2)
+        shapes = Counter()
+        with mock.patch.object(ss, 'MAX_CANDIDATES_TO_CHECK', 0):
+            for _ in range(800):
+                draw, _ = ss.make_draw(people, set(), rng)
+                self.assertValid(draw, people)
+                person, length = 'Alex', 0
+                while True:
+                    person, length = draw[person], length + 1
+                    if person == 'Alex':
+                        break
+                shapes[length] += 1
+        self.assertEqual(set(shapes), {3, 6})  # loops of 3 happen, swaps never
 
     def test_impossible(self):
         banned = {(person, 'Alex') for person in PEOPLE}
-        for single_loop in (True, False):
-            for limit in (ss.MAX_CANDIDATES_TO_CHECK, 0):
-                with self.subTest(single_loop=single_loop, limit=limit), \
-                        mock.patch.object(ss, 'MAX_CANDIDATES_TO_CHECK', limit), \
-                        mock.patch.object(ss, 'MAX_TRIES', 1000):
-                    with self.assertRaises(ss.DrawError):
-                        ss.make_draw(PEOPLE, banned, single_loop)
+        for limit in (ss.MAX_CANDIDATES_TO_CHECK, 0):
+            with self.subTest(limit=limit), \
+                    mock.patch.object(ss, 'MAX_CANDIDATES_TO_CHECK', limit), \
+                    mock.patch.object(ss, 'MAX_TRIES', 1000):
+                with self.assertRaises(ss.DrawError):
+                    ss.make_draw(PEOPLE, banned)
 
     def test_big_group(self):
         people = [f'P{i}' for i in range(30)]
-        for single_loop in (True, False):
-            draw, count = ss.make_draw(people, set(), single_loop)
-            self.assertIsNone(count)
-            self.assertEqual(sorted(draw.values()), sorted(people))
-            self.assertTrue(all(giver != receiver for giver, receiver in draw.items()))
+        draw, count = ss.make_draw(people, set())
+        self.assertIsNone(count)
+        self.assertValid(draw, people)
 
     def test_bad_names(self):
-        with self.assertRaises(ss.DrawError):
-            ss.banned_pairs(['Alex', 'Alex', 'Chris'], [], {})
-        with self.assertRaises(ss.DrawError):
-            ss.banned_pairs(['Alex'], [], {})
+        for people in (['Alex', 'Alex', 'Chris'], ['Alex', 'Chris']):
+            with self.assertRaises(ss.DrawError):
+                ss.banned_pairs(people, [], {})
         with self.assertRaises(ss.DrawError):
             ss.banned_pairs(PEOPLE, [('Alex', 'Debby')], {})
         # a pair without the outer list, a missing comma, and a group of three
@@ -90,7 +94,6 @@ class DrawTests(unittest.TestCase):
     def test_banned_pairs(self):
         banned = ss.banned_pairs(PEOPLE, [('Alex', 'Debbie')], {'Glen': 'Jess'})
         self.assertEqual(banned, {('Alex', 'Debbie'), ('Debbie', 'Alex'), ('Glen', 'Jess')})
-
 
     def test_same_size_whoever_is_drawn(self):
         people = PEOPLE + ['Zoë']
@@ -127,28 +130,43 @@ class FileTests(unittest.TestCase):
         folders = {ss.make_run_folder(self.tmp) for _ in range(3)}
         self.assertEqual(len(folders), 3)
 
-    def run_main(self, **settings):
+    def run_main(self, *args, **settings):
         # Don't depend on whatever the real settings are this year.
         settings = {'PARTICIPANTS': PEOPLE, 'EXCLUDED_PAIRS': [], 'PREVIOUS_DRAW': None,
-                    'SINGLE_LOOP': False, 'OUTPUT_DIR': self.tmp, **settings}
+                    'OUTPUT_DIR': str(self.tmp), **settings}
         with mock.patch.multiple(ss, **settings), \
                 contextlib.redirect_stdout(io.StringIO()) as out:
-            ss.main()
+            ss.main(list(args))
         return out.getvalue()
 
     def test_main_never_repeats_previous_draw(self):
-        self.run_main()
+        out = self.run_main()
         [first] = self.tmp.iterdir()
+        self.assertIn(f"PREVIOUS_DRAW = '{first.name}'", out)
         previous = ss.read_draw(first)
         self.assertEqual(sorted(previous), sorted(PEOPLE))
         for _ in range(10):
-            out = self.run_main(PREVIOUS_DRAW=first)
+            out = self.run_main(PREVIOUS_DRAW=first.name)
             self.assertIn('Avoiding repeats', out)
         for folder in self.tmp.iterdir():
             if folder != first:
                 draw = ss.read_draw(folder)
                 self.assertFalse(set(draw.items()) & set(previous.items()))
         self.assertEqual(len(list(self.tmp.iterdir())), 11)
+
+    def test_output_option(self):
+        other = self.tmp / 'other'
+        other.mkdir()
+        self.run_main('--output', str(other))
+        self.assertEqual(list(self.tmp.iterdir()), [other])
+        [folder] = other.iterdir()
+        self.assertEqual(sorted(ss.read_draw(folder)), sorted(PEOPLE))
+
+    def test_missing_output_folder(self):
+        with self.assertRaises(SystemExit) as caught:
+            self.run_main(OUTPUT_DIR=str(self.tmp / 'nope'))
+        self.assertIn("Can't find the output folder", str(caught.exception))
+        self.assertEqual(list(self.tmp.iterdir()), [])
 
     def test_files_written_in_list_order(self):
         written = []
@@ -159,13 +177,11 @@ class FileTests(unittest.TestCase):
             return write_text(path, *args, **kwargs)
 
         with mock.patch.object(Path, 'write_text', record):
-            self.run_main(SINGLE_LOOP=True)
+            self.run_main()
         self.assertEqual(written, PEOPLE)
 
     def test_warns_when_few_draws(self):
-        out = self.run_main(SINGLE_LOOP=True, FEW_DRAWS=100)
-        self.assertIn('very few', out)
-        self.assertIn('SINGLE_LOOP = False', out)
+        self.assertIn('very few', self.run_main(FEW_DRAWS=100))
         self.assertNotIn('very few', self.run_main())
 
     def test_main_reports_impossible(self):
